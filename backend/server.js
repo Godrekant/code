@@ -1,61 +1,107 @@
-/**
- * Live Coding Platform Server
- * Node.js setup using Express for hosting and Socket.IO for real-time synchronization.
- */
-
 const express = require('express');
-const http = require('http');
+const fetch = require('node-fetch');
 const path = require('path');
-const { Server } = require('socket.io'); 
 
 const app = express();
-// Create an HTTP server instance from the Express app
-const server = http.createServer(app); 
+// IMPORTANT: Use the port provided by the environment (Render) or default to 3000 for local testing.
+const PORT = process.env.PORT || 3000;
 
-// Initialize Socket.IO and attach it to the HTTP server
-const io = new Server(server);
-const port = 3000;
+// --- CONFIGURATION ---
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
 
-// Simple state storage for code (in-memory, non-persistent)
-let currentCodeState = {
-    html: '<!-- Welcome to the Live Code Editor! -->\n<h1>Real-time HTML/CSS/JS</h1>\n<p id="time"></p>',
-    css: 'body { font-family: sans-serif; background: #f0f0f0; padding: 20px; }\nh1 { color: #2563eb; }',
-    javascript: 'let counter = 0;\nsetInterval(() => {\n  counter++;\n  const el = document.getElementById("time");\n  if (el) el.innerHTML = `Seconds active: ${counter}`;\n}, 1000);'
-};
+if (!GEMINI_API_KEY) {
+    console.warn("WARNING: GEMINI_API_KEY environment variable is not set. This will fail on Render unless configured there.");
+}
 
-// --- Middleware and Static File Serving ---
+// Middleware to parse JSON bodies
+app.use(express.json());
 
-// Serve the static index.html file from the current directory
+// Serve the HTML file from the same directory
 app.get('/', (req, res) => {
-    // __dirname is the directory where server.js lives
-    res.sendFile(path.join(__dirname, 'index.html'));
+    // Note: 'chatbot.html' must be in the same directory as 'server.js'
+    res.sendFile(path.join(__dirname, 'chatbot.html'));
 });
 
-// --- Socket.IO Real-time Connection Logic ---
+// --- API Endpoint for Chat Logic ---
+app.post('/api/chat', async (req, res) => {
+    const userPrompt = req.body.prompt;
+    if (!userPrompt) {
+        return res.status(400).json({ error: 'Missing user prompt' });
+    }
 
-io.on('connection', (socket) => {
-    console.log(`A user connected: ${socket.id}`);
+    // Ensure the key is available before proceeding
+    if (!GEMINI_API_KEY) {
+        return res.status(500).json({ error: 'Server API Key is not configured.' });
+    }
 
-    // 1. Synchronization: Send the current code state to the newly connected user
-    socket.emit('initialCode', currentCodeState);
+    try {
+        const systemPrompt = "You are a friendly, concise, and highly informative assistant. Your responses should be based on real-time information when possible, which you will obtain using the Google Search tool. Your goal is to provide accurate and helpful answers.";
 
-    // 2. Listen for 'codeChange' events from any client
-    socket.on('codeChange', (updatedCode) => {
-        // Update the server's master state
-        currentCodeState = updatedCode; 
+        const payload = {
+            contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+            tools: [{ "google_search": {} }],
+            systemInstruction: {
+                parts: [{ text: systemPrompt }]
+            }
+        };
+
+        const MAX_RETRIES = 5;
+        let response = null;
+        for (let i = 0; i < MAX_RETRIES; i++) {
+            try {
+                response = await fetch(`${API_URL}?key=${GEMINI_API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    break;
+                } else if (response.status === 429 && i < MAX_RETRIES - 1) {
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                    throw new Error(`External API error: ${response.status} ${response.statusText}`);
+                }
+            } catch (error) {
+                if (i === MAX_RETRIES - 1) throw error; 
+            }
+        }
+
+        if (!response) {
+            throw new Error("Failed to get a response after multiple retries.");
+        }
+
+        const result = await response.json();
         
-        // 3. Broadcast the updated code to all *other* connected clients
-        socket.broadcast.emit('codeUpdate', currentCodeState);
-    });
+        const candidate = result.candidates?.[0];
+        let botText = "I encountered an error trying to process that request.";
+        let sources = [];
 
-    socket.on('disconnect', () => {
-        console.log(`User disconnected: ${socket.id}`);
-    });
+        if (candidate && candidate.content?.parts?.[0]?.text) {
+            botText = candidate.content.parts[0].text;
+
+            const groundingMetadata = candidate.groundingMetadata;
+            if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                sources = groundingMetadata.groundingAttributions
+                    .map(attribution => ({
+                        uri: attribution.web?.uri,
+                        title: attribution.web?.title,
+                    }))
+                    .filter(source => source.uri && source.title);
+            }
+        }
+
+        res.json({ text: botText, sources: sources });
+
+    } catch (error) {
+        console.error("Gemini API Call Error:", error);
+        res.status(500).json({ error: 'Failed to communicate with the AI model.' });
+    }
 });
 
-// --- Start the Server ---
-server.listen(port, () => {
-    console.log(`\nLive Coding Server running at http://localhost:${port}`);
-    console.log('If you haven\'t already, run: npm install');
-    console.log('Then run: node server.js');
+// Start the server
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
 });
