@@ -1,19 +1,14 @@
 {
-  "name": "gemini-traditional-http-chatbot",
+  "name": "gemini-traditional-http-chatbot-v13",
   "version": "1.0.0",
-  "description": "A server-backed chatbot using native Node.js HTTP module and the Gemini API.",
+  "description": "A server-backed chatbot using native Node.js HTTP module compatible with v13.14.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [
-    "gemini",
-    "chatbot",
-    "nodejs",
-    "http"
-  ],
-  "author": "",
-  "license": "ISC",
+  "engines": {
+    "node": "13.14.0"
+  },
   "dependencies": {
     "node-fetch": "^2.6.7"
   }
